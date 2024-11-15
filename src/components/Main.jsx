@@ -14,6 +14,35 @@ function Main() {
         Authorization: `token ${GITHUB_TOKEN}`,
     };
 
+    const checkRepoHasCommits = async (repo, username) => {
+        try {
+            const commitsResponse = await axios.get(
+                `https://api.github.com/repos/${username}/${repo.name}/commits`,
+                { headers }
+            );
+            return commitsResponse.data.length > 0;
+        } catch(error) {
+            console.error(`Error checking commits for repo ${repo.name}:`, error.message);
+            return false;
+        }
+    };
+
+    const checkEnvFileExistence = async (repo, username) => {
+        try {
+            const response = await axios.get(
+                `https://api.github.com/repos/${username}/${repo.name}/contents/.env`,
+                { headers }
+            );
+            return response.status === 200;
+        } catch (error) {
+            if (error.response && error.response.status === 404) {
+                return false;
+            }
+            console.error("Error checking .env file existence", error);
+            return false;
+        }
+    };
+
     const handleSubmit = async () => {
         setLoading(true);
         setEnvCounts(0);
@@ -31,17 +60,29 @@ function Main() {
             const reposWithEnvFiles = [];
 
             for (const repo of repos) {
-                const commitsResponse = await axios.get(
-                    `https://api.github.com/repos/${username}/${repo.name}/commits?path=.env`,
-                    { headers }
-                );
-                if (commitsResponse.data.length > 0) {
-                    totalEnvCommits += commitsResponse.data.length;
-                    reposWithEnvFiles.push({
-                        name: repo.name,
-                        url: repo.html_url,
-                        description: repo.description || "No description provided.",
-                    });
+                const hasCommits = await checkRepoHasCommits(repo, username);
+                if (!hasCommits) {
+                    continue;
+                }
+
+                const fileExists = await checkEnvFileExistence(repo, username);
+                if (fileExists) {
+                    try {
+                        const commitsResponse = await axios.get(
+                            `https://api.github.com/repos/${username}/${repo.name}/commits?path=.env`,
+                            { headers }
+                        );
+                        if (commitsResponse.data.length > 0) {
+                            totalEnvCommits += commitsResponse.data.length;
+                            reposWithEnvFiles.push({
+                                name: repo.name,
+                                url: repo.html_url,
+                                description: repo.description || "No description provided.",
+                            });
+                        }
+                    } catch (error) {
+                        console.log(`Error fetching commits for repo ${repo.name}: ${error.message}`);
+                    }
                 }
             }
 
@@ -54,10 +95,11 @@ function Main() {
             setEnvCounts(totalEnvCommits);
             setEnvRepos(reposWithEnvFiles);
 
-            if (totalEnvCommits === 0) {
+            if (reposWithEnvFiles.length === 0 && totalEnvCommits === 0) {
+                setMessage("No repositories with .env files found.");
+            } else if (totalEnvCommits === 0) {
                 setMessage("You are safe! You have not pushed any .env file to GitHub.");
             }
-
         } catch (error) {
             setMessage("Error fetching data. Please try again.");
             console.error("Error fetching data:", error.message);
