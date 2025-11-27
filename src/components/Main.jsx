@@ -53,6 +53,36 @@ function Main() {
         return { hasEnv: false, commitCount: 0, repoData: null };
     };
 
+    const fetchAllRepos = async (username) => {
+        let allRepos = [];
+        let page = 1;
+        let hasMore = true;
+
+        while (hasMore) {
+            try {
+                const response = await axios.get(
+                    `https://api.github.com/users/${username}/repos?per_page=100&page=${page}&sort=updated`,
+                    { headers }
+                );
+                
+                if (response.data.length === 0) {
+                    hasMore = false;
+                } else {
+                    allRepos = [...allRepos, ...response.data];
+                    page++;
+                    if (response.data.length < 100) {
+                        hasMore = false;
+                    }
+                }
+            } catch (error) {
+                console.error(`Error fetching repos page ${page}:`, error.message);
+                hasMore = false;
+            }
+        }
+
+        return allRepos;
+    };
+
     const handleSubmit = async () => {
         if (!username.trim()) {
             setMessage("Please enter a valid GitHub username.");
@@ -66,13 +96,13 @@ function Main() {
         setProgress({ current: 0, total: 0 });
 
         try {
-            const [userDetailsResponse, reposResponse] = await Promise.all([
+            const [userDetailsResponse, allRepos] = await Promise.all([
                 axios.get(`https://api.github.com/users/${username}`, { headers }),
-                axios.get(`https://api.github.com/users/${username}/repos?per_page=100&sort=updated`, { headers })
+                fetchAllRepos(username)
             ]);
 
             setAvatarUrl(userDetailsResponse.data.avatar_url);
-            const repos = reposResponse.data;
+            const repos = allRepos;
 
             if (repos.length === 0) {
                 setMessage("No repositories found for this user.");
