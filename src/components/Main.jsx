@@ -8,103 +8,119 @@ function Main() {
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState("");
     const [envRepos, setEnvRepos] = useState([]);
+    const [progress, setProgress] = useState({ current: 0, total: 0 });
 
     const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN;
-    const headers = {
+    const headers = GITHUB_TOKEN ? {
         Authorization: `token ${GITHUB_TOKEN}`,
-    };
+    } : {};
 
-    const checkRepoHasCommits = async (repo, username) => {
-        try {
-            const commitsResponse = await axios.get(
-                `https://api.github.com/repos/${username}/${repo.name}/commits`,
-                { headers }
-            );
-            return commitsResponse.data.length > 0;
-        } catch(error) {
-            console.error(`Error checking commits for repo ${repo.name}:`, error.message);
-            return false;
-        }
-    };
-
-    const checkEnvFileExistence = async (repo, username) => {
+    const checkRepoForEnvFile = async (repo, username) => {
         try {
             const response = await axios.get(
                 `https://api.github.com/repos/${username}/${repo.name}/contents/.env`,
                 { headers }
             );
-            return response.status === 200;
-        } catch (error) {
-            if (error.response && error.response.status === 404) {
-                return false;
+            
+            if (response.status === 200) {
+                try {
+                    const commitsResponse = await axios.get(
+                        `https://api.github.com/repos/${username}/${repo.name}/commits?path=.env&per_page=100`,
+                        { headers }
+                    );
+                    
+                    if (commitsResponse.data.length > 0) {
+                        return {
+                            hasEnv: true,
+                            commitCount: commitsResponse.data.length,
+                            repoData: {
+                                name: repo.name,
+                                url: repo.html_url,
+                                description: repo.description || "No description provided.",
+                            }
+                        };
+                    }
+                } catch (commitError) {
+                    console.error(`Error fetching commits for ${repo.name}:`, commitError.message);
+                }
             }
-            console.error("Error checking .env file existence", error);
-            return false;
+        } catch (error) {
+            if (error.response?.status !== 404) {
+                console.error(`Error checking ${repo.name}:`, error.message);
+            }
         }
+        
+        return { hasEnv: false, commitCount: 0, repoData: null };
     };
 
     const handleSubmit = async () => {
+        if (!username.trim()) {
+            setMessage("Please enter a valid GitHub username.");
+            return;
+        }
+
         setLoading(true);
         setEnvCounts(0);
         setMessage("");
         setEnvRepos([]);
+        setProgress({ current: 0, total: 0 });
 
         try {
-            const fetchRepos = await axios.get(
-                `https://api.github.com/users/${username}/repos`,
-                { headers }
-            );
-            const repos = fetchRepos.data;
+            const [userDetailsResponse, reposResponse] = await Promise.all([
+                axios.get(`https://api.github.com/users/${username}`, { headers }),
+                axios.get(`https://api.github.com/users/${username}/repos?per_page=100&sort=updated`, { headers })
+            ]);
 
+            setAvatarUrl(userDetailsResponse.data.avatar_url);
+            const repos = reposResponse.data;
+
+            if (repos.length === 0) {
+                setMessage("No repositories found for this user.");
+                return;
+            }
+
+            setProgress({ current: 0, total: repos.length });
+
+            const BATCH_SIZE = 10;
             let totalEnvCommits = 0;
             const reposWithEnvFiles = [];
 
-            for (const repo of repos) {
-                const hasCommits = await checkRepoHasCommits(repo, username);
-                if (!hasCommits) {
-                    continue;
-                }
+            for (let i = 0; i < repos.length; i += BATCH_SIZE) {
+                const batch = repos.slice(i, i + BATCH_SIZE);
+                const results = await Promise.all(
+                    batch.map(repo => checkRepoForEnvFile(repo, username))
+                );
 
-                const fileExists = await checkEnvFileExistence(repo, username);
-                if (fileExists) {
-                    try {
-                        const commitsResponse = await axios.get(
-                            `https://api.github.com/repos/${username}/${repo.name}/commits?path=.env`,
-                            { headers }
-                        );
-                        if (commitsResponse.data.length > 0) {
-                            totalEnvCommits += commitsResponse.data.length;
-                            reposWithEnvFiles.push({
-                                name: repo.name,
-                                url: repo.html_url,
-                                description: repo.description || "No description provided.",
-                            });
-                        }
-                    } catch (error) {
-                        console.log(`Error fetching commits for repo ${repo.name}: ${error.message}`);
+                results.forEach(result => {
+                    if (result.hasEnv) {
+                        totalEnvCommits += result.commitCount;
+                        reposWithEnvFiles.push(result.repoData);
                     }
-                }
-            }
+                });
 
-            const userDetails = await axios.get(
-                `https://api.github.com/users/${username}`,
-                { headers }
-            );
-            setAvatarUrl(userDetails.data.avatar_url);
+                setProgress({ current: Math.min(i + BATCH_SIZE, repos.length), total: repos.length });
+            }
 
             setEnvCounts(totalEnvCommits);
             setEnvRepos(reposWithEnvFiles);
 
-            if (reposWithEnvFiles.length === 0 && totalEnvCommits === 0) {
-                setMessage("No repositories with .env files found.");
-            } else if (totalEnvCommits === 0) {
-                setMessage("You are safe! You have not pushed any .env file to GitHub.");
+            if (totalEnvCommits === 0) {
+                setMessage("You are safe! No .env files found in your repositories.");
+            } else {
+                setMessage(`Warning: Found .env files in ${reposWithEnvFiles.length} repository${reposWithEnvFiles.length > 1 ? 's' : ''}.`);
             }
         } catch (error) {
-            setMessage("Error fetching data. Please try again.");
+            if (error.response?.status === 404) {
+                setMessage("User not found. Please check the username and try again.");
+            } else if (error.response?.status === 403) {
+                setMessage("Rate limit exceeded. Please try again later or add a GitHub token.");
+            } else {
+                setMessage("Error fetching data. Please check your connection and try again.");
+            }
             console.error("Error fetching data:", error.message);
         } finally {
             setLoading(false);
+            setProgress({ current: 0, total: 0 });
         }
     };
 
@@ -126,6 +142,7 @@ function Main() {
                     value={username}
                     placeholder="Enter your GitHub username"
                     onChange={(e) => setUsername(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && !loading && handleSubmit()}
                     className="w-full text-gray-800 px-4 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <button
@@ -140,6 +157,20 @@ function Main() {
                     {loading ? "Checking..." : "Check"}
                 </button>
             </div>
+
+            {loading && progress.total > 0 && (
+                <div className="w-full max-w-md">
+                    <div className="bg-gray-700 rounded-full h-2 overflow-hidden">
+                        <div 
+                            className="bg-blue-500 h-full transition-all duration-300"
+                            style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                        />
+                    </div>
+                    <p className="text-gray-300 text-sm text-center mt-2">
+                        Scanning repositories: {progress.current} / {progress.total}
+                    </p>
+                </div>
+            )}
 
             {message && (
                 <p
